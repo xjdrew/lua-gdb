@@ -43,6 +43,9 @@ def hvalue(o): return cast_u(o['value_']['gc'])['h']
 # <TValue> -> <boolean>
 def bvalue(o): return o['value_']['b']
 
+# <TValue> -> <lua_State>
+def thvalue(o): return cast_u(o['value_']['gc'])['th']
+
 # test type
 def ttisnumber(o): return o['tt_']&0xf == 3
 def ttisfloat(o): return o['tt_'] == 3
@@ -63,6 +66,10 @@ def ttislcf(o): return o['tt_'] == 6 | (1<<4)
 def ttisfulluserdata(o): return o['tt_'] == 0x40 | 7
 def ttisthread(o): return o['tt_'] == 0x40 | 8
 
+def cast_luaState(o):
+    tt = gdb.lookup_type("struct lua_State")
+    return o.cast(tt.pointer())
+
 #
 # Value wrappers
 #
@@ -74,14 +81,15 @@ class CallInfoValue:
     CIST_TAIL = 1<<5
     CIST_FIN = 1<<8
 
-    def __init__(self, val):
-        self.val = val
+    def __init__(self, L, ci):
+        self.L = L
+        self.ci = ci
 
-        if ttisLclosure(self.val['func']):
-            proto = clLvalue(self.val['func'])['p']
+        if ttisLclosure(self.ci['func']):
+            proto = clLvalue(self.ci['func'])['p']
 
             if not proto['source']:
-                self.source = "=?"
+                self.source = "?"
             else:
                 self.source = proto['source'].dereference()
 
@@ -94,16 +102,18 @@ class CallInfoValue:
                 self.what = "Lua"
 
             if proto['lineinfo']:
-                currentpc = (self.val['u']['l']['savedpc'] - proto['code']) - 1 
+                currentpc = (self.ci['u']['l']['savedpc'] - proto['code']) - 1 
                 self.currentline = (proto['lineinfo']+currentpc).dereference()
             else:
                 self.currentline = -1
+
         else:
-            self.source = "=[C]"
+            self.source = "[C]"
             self.linedefined = -1
             self.lastlinedefined = -1
             self.what = "C"
             self.currentline = -1
+
 
         self.name = None
         self.namewhat = None
@@ -116,18 +126,49 @@ class CallInfoValue:
     def funcname(self):
         if self.what == "main":
             return "main chunk"
-        elif self.namewhat:
+
+        if self.namewhat:
             return "%s '%s'" % (self.namewhat, self.name)
+
+        func = self.ci['func']
+        if ttislcf(func):
+            return "%s" % fvalue(func)
+
+        if ttisCclosure(func):
+            return "%s" % clCvalue(func)['f']
+
         return '?'
 
     def is_lua(self):
-        return self.val['callstatus'] & CallInfoValue.CIST_LUA
+        return self.ci['callstatus'] & CallInfoValue.CIST_LUA
 
     def is_tailcall(self):
-        return self.val['callstatus'] & CallInfoValue.CIST_TAIL
+        return self.ci['callstatus'] & CallInfoValue.CIST_TAIL
 
     def is_fin(self):
-        return self.val['callstatus'] & CallInfoValue.CIST_FIN
+        return self.ci['callstatus'] & CallInfoValue.CIST_FIN
+
+    @property
+    def stack_base(self):
+        if self.is_lua():
+            return self.ci['u']['l']['base']
+        else:
+            return self.ci['func'] + 1
+
+    @property
+    def stack_top(self):
+        nextci = self.ci['next']
+        if nextci:
+            nextcv = CallInfoValue(self.L, nextci)
+            return nextcv.stack_base
+        else:
+            return self.L['top']
+
+    def locvars(self):
+        value = self.stack_base
+        while value < self.stack_top:
+            yield value
+            value = value + 1
 
 #
 # Pretty Printers
@@ -145,12 +186,15 @@ class TValuePrinter:
         if ttisnil(self.val): # nil
             return "nil"
         elif ttisboolean(self.val): # boolean
-            return bvalue(self.val) > 0
+            if bvalue(self.val) > 0:
+                return True
+            else:
+                return False
         elif ttislightuserdata(self.val): # lightuserdata
             return "<lightuserdata 0x%x>" % int(pvalue(self.val))
         elif ttisnumber(self.val): # number
             if ttisfloat(self.val):
-                return nvalue(self.val)
+                return fltvalue(self.val)
             elif ttisinteger(self.val):
                 return ivalue(self.val)
         elif ttisstring(self.val): # string
@@ -167,7 +211,7 @@ class TValuePrinter:
         elif ttisfulluserdata(self.val):
             return "Userdata"
         elif ttisthread(self.val):
-            return "Thread"
+            return thvalue(self.val)
         assert False, self.val['tt_']
 
     def display_hint(self):
@@ -281,6 +325,28 @@ class CClosurePrinter:
     def children(self):
         yield "1", "nupvalues"
         yield "2", self.val['nupvalues']
+
+class LuaStatePrinter:
+    "Pretty print lua_State."
+
+    pattern = re.compile(r'^struct lua_State$')
+
+    def  __init__(self, val):
+        self.val = val
+
+    def display_hint(self):
+        return "map"
+
+    def to_string(self):
+        return "<thread 0x%x>" % int(self.val.address)
+
+    def children(self):
+        cv = CallInfoValue(self.val, self.val['ci'])
+        yield "1", "source"
+        yield "2", "%s:%d" % (cv.source, cv.currentline)
+        yield "3", "func"
+        yield "4", cv.funcname
+
 #
 #    Register all the *Printer classes above.
 #
@@ -296,13 +362,6 @@ def makematcher(klass):
 
 objfile.pretty_printers.extend([makematcher(var) for var in vars().values() if hasattr(var, 'pattern')])
 
-class LuaStackFunc(gdb.Function):
-    def __init__(self):
-        gdb.Function.__init__(self, "luastack")
-
-    def invoke(self):
-        return "lua stacK"
-
 class LuaStackCmd(gdb.Command):
     """luastack [L]
 Prints values on the Lua C stack. Without arguments, uses the current value of "L"
@@ -314,16 +373,16 @@ as the lua_State*. You can provide an alternate lua_State as the first argument.
     def invoke(self, args, _from_tty):
         argv = gdb.string_to_argv(args)
         if len(argv) > 0:
-            L = gdb.parse_and_eval(argv[0])
+            L = cast_luaState(gdb.parse_and_eval(argv[0]))
         else:
             L = gdb.parse_and_eval("L")
 
         stack = L['top'] - 1
-        while stack >= L['stack']:
+        while stack > L['stack']:
             print(stack.dereference())
             stack = stack - 1
 
-class LuaBacktrace(gdb.Command):
+class LuaTracebackCmd(gdb.Command):
     """luabacktrace [L]
 Dumps Lua execution stack, as debug.traceback() does. Without
 arguments, uses the current value of "L" as the
@@ -331,24 +390,90 @@ lua_State*. You can provide an alternate lua_State as the
 first argument.
     """
     def __init__(self):
-        gdb.Command.__init__(self, "luabacktrace", gdb.COMMAND_STACK, gdb.COMPLETE_NONE)
+        gdb.Command.__init__(self, "luatraceback", gdb.COMMAND_STACK, gdb.COMPLETE_NONE)
 
     def invoke(self, args, _from_tty): 
         argv = gdb.string_to_argv(args)
         if len(argv) > 0:
-            L = gdb.parse_and_eval(argv[0])
+            L = cast_luaState(gdb.parse_and_eval(argv[0]))
         else:
             L = gdb.parse_and_eval("L")
 
         ci = L['ci']
         print("stack traceback:")
         while ci != L['base_ci'].address:
-            cv = CallInfoValue(ci)
+            cv = CallInfoValue(L, ci)
             print('\t%s:%d: in %s' % (cv.source, cv.currentline, cv.funcname))
             if cv.is_tailcall():
                 print('\t(...tail calls...)')
             ci = ci['previous']
 
-LuaStackFunc()
+
+class LuaCoroutinesCmd(gdb.Command):
+    """luacoroutines [L]
+List all coroutines. Without arguments, uses the current value of "L" as the
+lua_State*. You can provide an alternate lua_State as the
+first argument.
+    """
+    def __init__(self):
+        gdb.Command.__init__(self, "luacoroutines", gdb.COMMAND_STACK, gdb.COMPLETE_NONE)
+
+    def invoke(self, args, _from_tty): 
+        argv = gdb.string_to_argv(args)
+        if len(argv) > 0:
+            L = cast_luaState(gdb.parse_and_eval(argv[0]))
+        else:
+            L = gdb.parse_and_eval("L")
+
+        # global_State
+        lG = L['l_G']
+
+        # mainthread
+        print("m", lG['mainthread'].dereference())
+
+        obj = lG['allgc']
+        while obj:
+            if obj['tt'] == 8:
+                print(" ", cast_u(obj)['th'])
+            obj = obj['next']
+
+class LuaGetLocalCmd(gdb.Command):
+    """luagetlocal [L [f]]
+Print all local variables of the function at level 'f' of the stack 'thread'. 
+With no arguments, Dump all local variable of the current funtion in the stack of 'L';
+    """
+    def __init__(self):
+        gdb.Command.__init__(self, "luagetlocal", gdb.COMMAND_STACK, gdb.COMPLETE_NONE)
+
+    def invoke(self, args, _from_tty):
+        argv = gdb.string_to_argv(args)
+        if len(argv) > 0:
+            L = cast_luaState(gdb.parse_and_eval(argv[0]))
+        else:
+            L = gdb.parse_and_eval("L")
+
+        if len(argv) > 1:
+            arg2 = gdb.parse_and_eval(argv[1])
+        else:
+            arg2 = gdb.parse_and_eval("0")
+
+        level = arg2 
+        ci = L['ci']
+        while level > 0: 
+            ci = ci['previous']
+            if ci == L['base_ci'].address:
+                break
+            level = level - 1
+
+        if level != 0:
+            print("No function at level %d" % arg2)
+            return
+
+        cv = CallInfoValue(L, ci)
+        for var in cv.locvars():
+            print(var.dereference())
+
 LuaStackCmd()
-LuaBacktrace()
+LuaTracebackCmd()
+LuaCoroutinesCmd()
+LuaGetLocalCmd()
