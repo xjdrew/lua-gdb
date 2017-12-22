@@ -70,10 +70,43 @@ def cast_luaState(o):
     tt = gdb.lookup_type("struct lua_State")
     return o.cast(tt.pointer())
 
+# gdb.Value to string
+def value_to_string(val):
+    s = str(val.dereference())
+    if len(s) > 1 and s[0] == '"' and s[-1] == '"':
+        return s[1:-1]
+    return s
+
+# gdb.Value to specific type tt
+def value_to_type_pointer(val, tt):
+    t = gdb.lookup_type(tt)
+    return val.cast(t.pointer())
 #
 # Value wrappers
 #
 
+# struct lua_TValue
+class TValueValue:
+    "Wrapper for TValue value."
+
+    def __init__(self, val):
+        self.val = val
+
+    def upvars(self):
+        if ttisCclosure(self.val):
+            f = clCvalue(self.val)
+            for i in xrange(f['nupvalues']):
+                yield "(%d)" % (i+1), value_to_type_pointer(f['upvalue'], "TValue") + i
+        elif ttisLclosure(self.val):
+            f = clLvalue(self.val)
+            proto = f['p']
+            for i in xrange(int(proto['sizeupvalues'])):
+                uv = value_to_type_pointer(f['upvals'], "struct UpVal") + i
+                value = uv['v']
+                name = (proto['upvalues'] + i)['name']
+                yield value_to_string(name), value
+
+# struct CallInfo
 class CallInfoValue:
     "Wrapper for CallInfo value."
 
@@ -85,8 +118,9 @@ class CallInfoValue:
         self.L = L
         self.ci = ci
 
-        if ttisLclosure(self.ci['func']):
+        if self.is_lua():
             proto = clLvalue(self.ci['func'])['p']
+            self.proto = proto
 
             if not proto['source']:
                 self.source = "?"
@@ -101,9 +135,10 @@ class CallInfoValue:
             else:
                 self.what = "Lua"
 
+
+            self.currentpc = (self.ci['u']['l']['savedpc'] - proto['code']) - 1 
             if proto['lineinfo']:
-                currentpc = (self.ci['u']['l']['savedpc'] - proto['code']) - 1 
-                self.currentline = (proto['lineinfo']+currentpc).dereference()
+                self.currentline = (proto['lineinfo'] + self.currentpc).dereference()
             else:
                 self.currentline = -1
 
@@ -147,6 +182,10 @@ class CallInfoValue:
 
     def is_fin(self):
         return self.ci['callstatus'] & CallInfoValue.CIST_FIN
+    
+    # stack frame information
+    def frame_info(self):
+        return '%s:%d: in %s' % (self.source, self.currentline, self.funcname)
 
     @property
     def stack_base(self):
@@ -155,20 +194,67 @@ class CallInfoValue:
         else:
             return self.ci['func'] + 1
 
+    # luastack:
+    #   local
+    #   arg2
+    #   arg1             <- base
+    #   vararg2
+    #   vararg1
+    #   nil              <- for fix arg2
+    #   nil              <- for fix arg1
+    #   callee           <- ci->func
     @property
     def stack_top(self):
         nextci = self.ci['next']
         if nextci:
             nextcv = CallInfoValue(self.L, nextci)
-            return nextcv.stack_base
+            return nextcv.stack_base - 1
         else:
             return self.L['top']
 
+    def getlocalname(self, n):
+        if not self.is_lua():
+            return None
+
+        proto = self.proto
+        currentpc = self.currentpc
+
+        i = 0
+        while i< proto['sizelocvars']:
+            locvar = proto['locvars'] + i
+            if locvar['startpc'] <= currentpc and currentpc < locvar['endpc']:
+                n = n - 1
+                if n == 0:
+                    return value_to_string(locvar['varname'])
+            i = i + 1
+        return None
+
+    def upvars(self):
+        tv = TValueValue(self.ci['func'])
+        return tv.upvars()
+
+    def varargs(self):
+        if not self.is_lua():
+            return
+
+        nparams = int(self.proto['numparams'])
+        n = int(self.stack_base - self.ci['func']) - nparams
+        if n <= 0: # no varargs
+            return
+
+        for i in xrange(n - 1):
+            yield "(*vararg)", self.ci['func'] + nparams + i + 1
+
     def locvars(self):
         value = self.stack_base
+        i = 1
         while value < self.stack_top:
-            yield value
+            name = self.getlocalname(i)
+            if not name:
+                name = "(*temporary)"
+            yield name, value
             value = value + 1
+            i = i + 1
 
 #
 # Pretty Printers
@@ -338,7 +424,7 @@ class LuaStatePrinter:
         return "map"
 
     def to_string(self):
-        return "<thread 0x%x>" % int(self.val.address)
+        return "<coroutine 0x%x>" % int(self.val.address)
 
     def children(self):
         cv = CallInfoValue(self.val, self.val['ci'])
@@ -378,9 +464,11 @@ as the lua_State*. You can provide an alternate lua_State as the first argument.
             L = gdb.parse_and_eval("L")
 
         stack = L['top'] - 1
+        i = 0
         while stack > L['stack']:
-            print(stack.dereference())
+            print("#%d\t0x%x\t%s" % (i, int(stack), stack.dereference()))
             stack = stack - 1
+            i = i + 1
 
 class LuaTracebackCmd(gdb.Command):
     """luabacktrace [L]
@@ -403,7 +491,7 @@ first argument.
         print("stack traceback:")
         while ci != L['base_ci'].address:
             cv = CallInfoValue(L, ci)
-            print('\t%s:%d: in %s' % (cv.source, cv.currentline, cv.funcname))
+            print('\t%s' % (cv.frame_info()))
             if cv.is_tailcall():
                 print('\t(...tail calls...)')
             ci = ci['previous']
@@ -470,8 +558,16 @@ With no arguments, Dump all local variable of the current funtion in the stack o
             return
 
         cv = CallInfoValue(L, ci)
-        for var in cv.locvars():
-            print(var.dereference())
+        print("call info: %s" % cv.frame_info())
+
+        for name, var in cv.upvars():
+            print("\tupval %s = %s" % (name, var.dereference()))
+
+        for name, var in cv.varargs():
+            print("\t..... %s = %s" % (name, var.dereference()))
+
+        for name, var in cv.locvars():
+            print("\tlocal %s = %s" % (name, var.dereference()))
 
 LuaStackCmd()
 LuaTracebackCmd()

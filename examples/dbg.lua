@@ -14,8 +14,9 @@ local t = {
 -- loop
 t.t = t
 
-local function d1(x)
-    return os.time() + x
+local function d1(x, i, ...)
+    local n = select('#', ...)
+    return os.time() + x + i + n
 end
 
 local function d0(x, t)
@@ -25,7 +26,10 @@ local function d0(x, t)
     end
 
     local co = coroutine.create(d1)
-    local ok, v = coroutine.resume(co, x)
+    local i = 5
+    local j = 1
+    local k = "kkk"
+    local ok, v = coroutine.resume(co, x, i, j, k)
     return v
 end
 
