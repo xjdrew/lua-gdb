@@ -66,10 +66,6 @@ def ttislcf(o): return o['tt_'] == 6 | (1<<4)
 def ttisfulluserdata(o): return o['tt_'] == 0x40 | 7
 def ttisthread(o): return o['tt_'] == 0x40 | 8
 
-def cast_luaState(o):
-    tt = gdb.lookup_type("struct lua_State")
-    return o.cast(tt.pointer())
-
 # gdb.Value to string
 def value_to_string(val):
     s = str(val.dereference())
@@ -78,9 +74,13 @@ def value_to_string(val):
     return s
 
 # gdb.Value to specific type tt
-def value_to_type_pointer(val, tt):
+def cast_to_type_pointer(o, tt):
     t = gdb.lookup_type(tt)
-    return val.cast(t.pointer())
+    return o.cast(t.pointer())
+
+def cast_luaState(o):
+    return cast_to_type_pointer(o, "struct lua_State")
+
 #
 # Value wrappers
 #
@@ -96,12 +96,12 @@ class TValueValue:
         if ttisCclosure(self.val):
             f = clCvalue(self.val)
             for i in xrange(f['nupvalues']):
-                yield "(%d)" % (i+1), value_to_type_pointer(f['upvalue'], "TValue") + i
+                yield "(%d)" % (i+1), cast_to_type_pointer(f['upvalue'], "TValue") + i
         elif ttisLclosure(self.val):
             f = clLvalue(self.val)
             proto = f['p']
             for i in xrange(int(proto['sizeupvalues'])):
-                uv = value_to_type_pointer(f['upvals'], "struct UpVal") + i
+                uv = cast_to_type_pointer(f['upvals'], "struct UpVal") + i
                 value = uv['v']
                 name = (proto['upvalues'] + i)['name']
                 yield value_to_string(name), value

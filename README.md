@@ -1,6 +1,8 @@
 # Lua-gdb
 gdb extension for lua5.3+.
 
+tested on GNU gdb (Ubuntu 7.11.1-0ubuntu1~16.5) 7.11.1.
+
 ## Features
 
 ### Pretty printer
@@ -18,15 +20,15 @@ gdb extension for lua5.3+.
 List all coroutines. Without arguments, uses the current value of "L" as the lua_State*. You can provide an alternate lua_State as the first argument.
 
 
-* luastack [coroutine]
+* luastack [L]
 
 Prints values on the Lua C stack. Without arguments, uses the current value of "L" as the lua_State*. You can provide an alternate lua_State as the first argument.
 
-* luatraceback  [coroutine]
+* luatraceback [L]
 
 Dumps Lua execution stack, as debug.traceback() does. Without arguments, uses the current value of "L" as the lua_State*.  You can provide an alternate lua_State as the first argument.  
 
-* luagetlocal [coroutine [f]]
+* luagetlocal [L [f]]
 
 Print all variables of the function at level 'f' of the stack 'coroutine'. With no arguments, Dump all variables of the current funtion in the stack of 'L'.
 
