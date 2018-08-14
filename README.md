@@ -32,6 +32,12 @@ Dumps Lua execution stack, as debug.traceback() does. Without arguments, uses th
 
 Print all variables of the function at level 'f' of the stack 'coroutine'. With no arguments, Dump all variables of the current funtion in the stack of 'L'.
 
+## Install
+
+```
+sudo cp lua-gdb.py /usr/share/gdb/python/
+```
+
 ## Usage (step by step)
 
 * compile lua with debug symbols
@@ -64,7 +70,7 @@ will hit the breakpoint `os_time`.
 
 * load the extension
 ```
-(gdb) source lua-gdb.py
+(gdb) py import lua-gdb.py
 Loading Lua Runtime support.
 ```
 
