@@ -11,10 +11,36 @@ if sys.version > '3':
 objfile = gdb.current_objfile() or gdb.objfiles()[0]
 objfile.pretty_printers = []
 
+
+# gdb.Value to specific type tt
+def cast_to_type_pointer(o, tt):
+    t = gdb.lookup_type(tt)
+    return o.cast(t.pointer())
+
+# basic types
+LUA_TNIL            =0
+LUA_TBOOLEAN        =1
+LUA_TLIGHTUSERDATA  =2
+LUA_TNUMBER	        =3
+LUA_TSTRING	        =4
+LUA_TTABLE          =5
+LUA_TFUNCTION       =6
+LUA_TUSERDATA       =7
+LUA_TTHREAD	        =8
+
+def makevariant(t, v): return t | (v << 4)
+def ctb(t): return t | (1 << 6)
+
+LUA_VFALSE = makevariant(LUA_TBOOLEAN, 0)
+LUA_VTRUE  = makevariant(LUA_TBOOLEAN, 1)
+
+# test type
+def checktype(o, t): return o['tt_']&0x0f == t
+def checktag(o, t): return o['tt_'] == t
+
 # input GCObject*
 def cast_u(o):
-    tt = gdb.lookup_type("union GCUnion")
-    return o.cast(tt.pointer())
+    return cast_to_type_pointer(o, "union GCUnion")
 
 # <TValue> -> <int>
 def ivalue(o): return o['value_']['i']
@@ -41,30 +67,50 @@ def fvalue(o): return o['value_']['f']
 def hvalue(o): return cast_u(o['value_']['gc'])['h']
 
 # <TValue> -> <boolean>
-def bvalue(o): return o['value_']['b']
+def bvalue(o): return checktype(o, LUA_VTRUE)
 
 # <TValue> -> <lua_State>
 def thvalue(o): return cast_u(o['value_']['gc'])['th']
 
-# test type
-def ttisnumber(o): return o['tt_']&0xf == 3
-def ttisfloat(o): return o['tt_'] == 3
-def ttisinteger(o): return o['tt_'] == 3 | (1<<4)
-def ttisnil(o): return o['tt_'] == 0
-def ttisboolean(o): return o['tt_'] == 1
-def ttislightuserdata(o): return o['tt_'] == 2
-def ttisstring(o): return o['tt_']&0xf == 4
-def ttisshrstring(o): return o['tt_']&0xf == 4
-def ttislngstring(o): return o['tt_'] == 0x40 | 4 
-def ttislngstring(o): return o['tt_'] == 0x40 | 4 | (1<<4)
-def ttistable(o): return o['tt_'] == 0x40 | 5
-def ttisfunction(o): return o['tt_']&0xf == 6
-def ttisclosure(o): return o['tt_']&0x1f == 6
-def ttisCclosure(o): return o['tt_'] == 0x40 | 6 | (2<<4)
-def ttisLclosure(o): return o['tt_'] == 0x40 | 6 | (0<<4)
-def ttislcf(o): return o['tt_'] == 6 | (1<<4)
-def ttisfulluserdata(o): return o['tt_'] == 0x40 | 7
-def ttisthread(o): return o['tt_'] == 0x40 | 8
+LUA_VNUMINT = makevariant(LUA_TNUMBER, 0)
+LUA_VNUMFLT = makevariant(LUA_TNUMBER, 1)
+
+def ttisnumber(o): return checktype(o, LUA_TNUMBER)
+def ttisfloat(o): return checktag(o, LUA_VNUMFLT)
+def ttisinteger(o): return checktag(o, LUA_VNUMINT)
+def ttisnil(o): return checktype(o, LUA_TNIL)
+def ttisboolean(o): return checktype(o, LUA_TBOOLEAN)
+
+LUA_VLIGHTUSERDATA = makevariant(LUA_TLIGHTUSERDATA, 0)
+LUA_VUSERDATA = makevariant(LUA_TUSERDATA, 0)
+
+def ttislightuserdata(o): return checktag(o, LUA_VLIGHTUSERDATA)
+def ttisfulluserdata(o): return checktag(o, ctb(LUA_VUSERDATA))
+
+LUA_VSHRSTR = makevariant(LUA_TSTRING, 0)
+LUA_VLNGSTR = makevariant(LUA_TSTRING, 1)
+
+def ttisstring(o): return checktype(o, LUA_TSTRING)
+def ttisshrstring(o): return checktype(o, ctb(LUA_VSHRSTR))
+def ttislngstring(o): return checktype(o, ctb(LUA_VLNGSTR))
+
+LUA_VTABLE = makevariant(LUA_TTABLE, 0)
+
+def ttistable(o): return checktag(o, ctb(LUA_VTABLE))
+
+LUA_VLCL = makevariant(LUA_TFUNCTION, 0)
+LUA_VLCF = makevariant(LUA_TFUNCTION, 1)
+LUA_VCCL = makevariant(LUA_TFUNCTION, 2)
+
+def ttisfunction(o): return checktype(o, LUA_TFUNCTION)
+def ttisclosure(o): return o['tt_'] & 0x1f == LUA_VLCL
+def ttisCclosure(o): return checktag(o, ctb(LUA_VCCL))
+def ttisLclosure(o): return checktag(o, ctb(LUA_VLCL))
+def ttislcf(o): return checktag(o, LUA_VLCF)
+
+LUA_VTHREAD = makevariant(LUA_TTHREAD, 0)
+
+def ttisthread(o): return checktag(o, ctb(LUA_VTHREAD))
 
 # gdb.Value to string
 def value_to_string(val):
@@ -73,17 +119,15 @@ def value_to_string(val):
         return s[1:-1]
     return s
 
-# gdb.Value to specific type tt
-def cast_to_type_pointer(o, tt):
-    t = gdb.lookup_type(tt)
-    return o.cast(t.pointer())
-
 def cast_luaState(o):
     return cast_to_type_pointer(o, "struct lua_State")
 
 #
 # Value wrappers
 #
+
+# StackValue to TValue
+def s2v(stk): return stk['val']
 
 # struct lua_TValue
 class TValueValue:
@@ -101,25 +145,31 @@ class TValueValue:
             f = clLvalue(self.val)
             proto = f['p']
             for i in xrange(int(proto['sizeupvalues'])):
-                uv = cast_to_type_pointer(f['upvals'], "struct UpVal") + i
+                uv = cast_to_type_pointer(f['upvals'][i], "struct UpVal")
                 value = uv['v']
                 name = (proto['upvalues'] + i)['name']
-                yield value_to_string(name), value
+                if name:
+                    yield value_to_string(name), value
+                else:
+                    yield "(no name)", value
 
 # struct CallInfo
 class CallInfoValue:
     "Wrapper for CallInfo value."
 
-    CIST_LUA = 1<<1
+    CIST_C = 1<<1
     CIST_TAIL = 1<<5
-    CIST_FIN = 1<<8
+    CIST_FIN = 1<<7
 
     def __init__(self, L, ci):
         self.L = L
         self.ci = ci
 
+        self.name = None
+        self.namewhat = None
+
         if self.is_lua():
-            proto = clLvalue(self.ci['func'])['p']
+            proto = clLvalue(s2v(self.ci['func']))['p']
             self.proto = proto
 
             if not proto['source']:
@@ -135,12 +185,8 @@ class CallInfoValue:
             else:
                 self.what = "Lua"
 
-
             self.currentpc = (self.ci['u']['l']['savedpc'] - proto['code']) - 1 
-            if proto['lineinfo']:
-                self.currentline = (proto['lineinfo'] + self.currentpc).dereference()
-            else:
-                self.currentline = -1
+            self.currentline = self.getfuncline(proto, self.currentpc)
 
         else:
             self.source = "[C]"
@@ -149,13 +195,36 @@ class CallInfoValue:
             self.what = "C"
             self.currentline = -1
 
-
-        self.name = None
-        self.namewhat = None
-
         if self.is_fin():
             self.name = "__gc"
             self.namewhat = "metamethod"
+
+    def getfuncline(self, proto, pc):
+        """
+            ldebug.c luaG_getfuncline
+        """
+        if not proto['lineinfo']:
+            return -1
+        def getbaseline(proto, pc):
+            if proto['sizeabslineinfo'] == 0 or pc < proto['abslineinfo'][0]['pc']:
+                return -1, proto['linedefined']
+            if pc >= proto['abslineinfo'][proto['sizeabslineinfo']-1]['pc']:
+                i = proto['sizeabslineinfo']-1
+            else:
+                j = proto['sizeabslineinfo']-1
+                i = 0
+                while i < j - 1:
+                    m = (j + i) / 2
+                    if pc >= proto['abslineinfo'][m]['pc']:
+                        i = m
+                    else:
+                        j = m
+            return proto['abslineinfo'][i]['pc'], proto['abslineinfo'][i]['line']
+        basepc, baseline = getbaseline(proto, pc)
+        while basepc < pc:
+            basepc+=1
+            baseline += proto['lineinfo'][basepc]
+        return baseline
 
     @property
     def funcname(self):
@@ -165,7 +234,7 @@ class CallInfoValue:
         if self.namewhat:
             return "%s '%s'" % (self.namewhat, self.name)
 
-        func = self.ci['func']
+        func = s2v(self.ci['func'])
         if ttislcf(func):
             return "%s" % fvalue(func)
 
@@ -175,7 +244,7 @@ class CallInfoValue:
         return '?'
 
     def is_lua(self):
-        return self.ci['callstatus'] & CallInfoValue.CIST_LUA
+        return not (self.ci['callstatus'] & CallInfoValue.CIST_C)
 
     def is_tailcall(self):
         return self.ci['callstatus'] & CallInfoValue.CIST_TAIL
@@ -187,30 +256,28 @@ class CallInfoValue:
     def frame_info(self):
         return '%s:%d: in %s' % (self.source, self.currentline, self.funcname)
 
+    # luastack:
+    #   vararg(1)
+    #   ...
+    #   vararg(nextraargs) <- ci->u.l.nextraargs nextra vararg
+    #   callee             <- ci->func
+    #   arg(1)
+    #   ...
+    #   arg(n)
+    #   local(1)
+    #   ...
+    #   local(n)
     @property
     def stack_base(self):
-        if self.is_lua():
-            return self.ci['u']['l']['base']
-        else:
-            return self.ci['func'] + 1
+        return self.ci['func'] + 1
 
-    # luastack:
-    #   local
-    #   arg2
-    #   arg1             <- base
-    #   vararg2
-    #   vararg1
-    #   nil              <- for fix arg2
-    #   nil              <- for fix arg1
-    #   callee           <- ci->func
     @property
     def stack_top(self):
-        nextci = self.ci['next']
-        if nextci:
-            nextcv = CallInfoValue(self.L, nextci)
-            return nextcv.stack_base - 1
-        else:
+        if self.ci == self.L['ci']:
             return self.L['top']
+        else:
+            nextcv = CallInfoValue(self.L, self.ci['next'])
+            return nextcv.stack_base - 1
 
     def getlocalname(self, n):
         if not self.is_lua():
@@ -230,35 +297,72 @@ class CallInfoValue:
         return None
 
     def upvars(self):
-        tv = TValueValue(self.ci['func'])
+        tv = TValueValue(s2v(self.ci['func']))
         return tv.upvars()
 
     def varargs(self):
         if not self.is_lua():
             return
 
-        nparams = int(self.proto['numparams'])
-        n = int(self.stack_base - self.ci['func']) - nparams
-        if n <= 0: # no varargs
-            return
+        if self.proto['is_vararg'] != 1:
+            return 
 
-        for i in xrange(n - 1):
-            yield "(*vararg)", self.ci['func'] + nparams + i + 1
+        nextra = self.ci['u']['l']['nextraargs']
+        for i in xrange(nextra):
+            yield "(*vararg)", s2v(self.ci['func'] - (i+1)).address
 
     def locvars(self):
-        value = self.stack_base
+        base = self.stack_base
+        limit = self.stack_top
         i = 1
-        while value < self.stack_top:
+        while True:
             name = self.getlocalname(i)
             if not name:
-                name = "(*temporary)"
-            yield name, value
-            value = value + 1
+                if (limit - base) >= i:
+                    if self.is_lua():
+                        name = "(temporary)"
+                    else:
+                        name = "(C temporary)"
+                else:
+                    return
+            yield name, s2v(base + i - 1).address
             i = i + 1
 
 #
 # Pretty Printers
 #
+
+def tvaluestring(value):
+    if ttisnil(value): # nil
+            return "nil"
+    elif ttisboolean(value): # boolean
+        if bvalue(value) > 0:
+            return "True"
+        else:
+            return "False"
+    elif ttisnumber(value): # number
+        if ttisfloat(value):
+            return fltvalue(value)
+        elif ttisinteger(value):
+            return ivalue(value)
+    elif ttisstring(value): # string
+        return tsvalue(value)
+    elif ttistable(value): # table
+        return hvalue(value)
+    elif ttisfunction(value):
+        if ttisLclosure(value): # lua closure
+            return clLvalue(value)
+        elif ttislcf(value): # light C function
+            return fvalue(value)
+        elif ttisCclosure(value): # 2 C closure
+            return clCvalue(value)
+    elif ttisfulluserdata(value):
+        return "Userdata"
+    elif ttislightuserdata(value): # lightuserdata
+        return "<lightuserdata 0x%x>" % int(pvalue(value))
+    elif ttisthread(value):
+        return thvalue(value)
+    assert False, value['tt_']
 
 class TValuePrinter:
     "Pretty print lua value."
@@ -269,36 +373,7 @@ class TValuePrinter:
         self.val = val
 
     def to_string(self):
-        if ttisnil(self.val): # nil
-            return "nil"
-        elif ttisboolean(self.val): # boolean
-            if bvalue(self.val) > 0:
-                return True
-            else:
-                return False
-        elif ttislightuserdata(self.val): # lightuserdata
-            return "<lightuserdata 0x%x>" % int(pvalue(self.val))
-        elif ttisnumber(self.val): # number
-            if ttisfloat(self.val):
-                return fltvalue(self.val)
-            elif ttisinteger(self.val):
-                return ivalue(self.val)
-        elif ttisstring(self.val): # string
-            return tsvalue(self.val)
-        elif ttistable(self.val): # table
-            return hvalue(self.val)
-        elif ttisfunction(self.val):
-            if ttisLclosure(self.val): # lua closure
-                return clLvalue(self.val)
-            elif ttislcf(self.val): # light C function
-                return fvalue(self.val)
-            elif ttisCclosure(self.val): # 2 C closure
-                return clCvalue(self.val)
-        elif ttisfulluserdata(self.val):
-            return "Userdata"
-        elif ttisthread(self.val):
-            return thvalue(self.val)
-        assert False, self.val['tt_']
+        return tvaluestring(self.val)
 
     def display_hint(self):
         return "string"
@@ -315,7 +390,7 @@ class TStringPrinter:
         return "string"
 
     def to_string(self):
-        s = self.val.address + 1
+        s = self.val["contents"]
         return s.cast(gdb.lookup_type('char').pointer())
 
 class TablePrinter:
@@ -345,27 +420,50 @@ class TablePrinter:
         TablePrinter.marked[address] = self.to_string()
 
         # array part
+        sizearray = self.realasize()
         i = 0
-        while i < self.val['sizearray']:
-            val = self.val['array'] + i
-            i = i + 1
+        while i < sizearray:
+            val = self.val['array'][i]
+            if ttisnil(val):
+                continue
             yield str(2*i), i
-            yield str(2*i + 1), val.dereference()
+            yield str(2*i + 1), val
+            i = i + 1
 
         # hash part
         j = 0
         last = 1 << self.val['lsizenode']
         while j < last:
-            node = self.val['node'] + j
+            node = self.val['node'][j]
             j = j + 1
-            key = node['i_key']['tvk']
-            if ttisnil(key): 
+            value = node['i_val']
+            if ttisnil(value):
                 continue
-            yield str(2*i + 2*j), key
-            yield str(2*i + 2*j + 1), node['i_val']
+            fakeTValue = {
+                "tt_": node['u']['key_tt'],
+                "value_": node['u']['key_val']
+            }
+            yield str(2*i + 2*j), tvaluestring(fakeTValue)
+            yield str(2*i + 2*j + 1), value
 
         if setMarked:
             TablePrinter.marked = None
+
+    def realasize(self):
+        def isrealasize(self): return (self.val['flags'] & (1<<7)) == 0
+        def ispow2(x): return (((x) & ((x) - 1)) == 0)
+        if (isrealasize(self) or ispow2(self.val['alimit'])):
+            return self.val['alimit']
+        else:
+            size = self.val['alimit']
+            size |= (size >> 1)
+            size |= (size >> 2)
+            size |= (size >> 4)
+            size |= (size >> 8)
+            size |= (size >> 16)
+            size += 1
+            return size
+
 
 class LClosurePrinter:
     "Pretty print lua closure."
@@ -379,7 +477,6 @@ class LClosurePrinter:
         return "map"
 
     def to_string(self):
-        p = self.val['p']
         return "<lclosure 0x%x>" % int(self.val.address)
 
     def children(self):
@@ -405,7 +502,6 @@ class CClosurePrinter:
         return "map"
 
     def to_string(self):
-        p = self.val['p']
         return "<cclosure 0x%x>" % int(self.val.address)
 
     def children(self):
@@ -417,7 +513,7 @@ class LuaStatePrinter:
 
     pattern = re.compile(r'^struct lua_State$')
 
-    def  __init__(self, val):
+    def __init__(self, val):
         self.val = val
 
     def display_hint(self):
