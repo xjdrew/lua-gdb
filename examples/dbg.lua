@@ -22,7 +22,7 @@ end
 local function d0(x, t)
     local limit = math.random(20)
     if x > limit then
-        return d1(0) + 5
+        local c = d1(0, 1) + 5
     end
 
     local co = coroutine.create(d1)
