@@ -1,6 +1,7 @@
 local t = {
     "hello",
     "world",
+    1, 2, 3,
     vacant = nil,
     boolean = true,
     int = 5,
@@ -10,7 +11,9 @@ local t = {
     func = function() end,
     co = coroutine.create(function() end),
 }
-
+-- hole
+t[4] = nil
+print(#t)
 -- loop
 t.t = t
 
