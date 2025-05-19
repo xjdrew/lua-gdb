@@ -425,6 +425,7 @@ class TablePrinter:
         while i < sizearray:
             val = self.val['array'][i]
             if ttisnil(val):
+                i = i + 1
                 continue
             yield str(2*i), i
             yield str(2*i + 1), val
