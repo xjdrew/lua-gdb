@@ -278,7 +278,7 @@ class CallInfoValue:
     @property
     def stack_top(self):
        if self.ci == self.L['ci']:
-          return self.L['top']
+          return cast_u(self.L['top'],'TValue')
        else:
           nextcv = CallInfoValue(self.L, self.ci['next'])
           return nextcv.stack_base - 1
@@ -322,7 +322,7 @@ class CallInfoValue:
        while True:
           name = self.getlocalname(i)
           if not name:
-             if (limit - base) >= i:
+             if limit - base >= i:
                 if self.is_lua():
                     name = "(temporary)"
                 else:
@@ -577,7 +577,6 @@ as the lua_State*. You can provide an alternate lua_State as the first argument.
 
            i = 0
            while stack > L['stack']['p']:
-              print("haha",i)
               print("#%d\t%s\t%s" % (i, str(stack), stack['tbclist']))
               stack = stack - 1
               i = i + 1
@@ -694,7 +693,8 @@ With no arguments, Dump all local variable of the current funtion in the stack o
               print("\t..... %s = %s" % (name, var.dereference()))
 
            for name, var in cv.locvars():
-              print("\tlocal %s = %s" % (name, var.dereference()))
+              print("\tlocal %s = %s" % (name, tvaluestring(var)))
+              #print("\tlocal %s = %s" % (name, var.dereference()))
         except Exception as e:
             traceback.print_exc()
 
@@ -702,3 +702,6 @@ LuaStackCmd()
 LuaTracebackCmd()
 LuaCoroutinesCmd()
 LuaGetLocalCmd()
+LuaPrintTableCmd()
+
+# set print elements 0, 无限制显示所有内容(table较大时)
