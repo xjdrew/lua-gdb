@@ -702,6 +702,5 @@ LuaStackCmd()
 LuaTracebackCmd()
 LuaCoroutinesCmd()
 LuaGetLocalCmd()
-LuaPrintTableCmd()
 
 # set print elements 0, 无限制显示所有内容(table较大时)
